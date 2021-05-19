@@ -1,0 +1,287 @@
+<?php
+
+/**
+ * Manages user authentication with LDAP server.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public License,
+ * v. 2.0. If a copy of the MPL was not distributed with this file, You can
+ * obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * @package   phpMyFAQ
+ * @author    Alberto Cabello <alberto@unex.es>
+ * @author    Lars Scheithauer <larsscheithauer@googlemail.com>
+ * @author    Thorsten Rinne <thorsten@phpmyfaq.de>
+ * @copyright 2009-2020 phpMyFAQ Team
+ * @license   http://www.mozilla.org/MPL/2.0/ Mozilla Public License Version 2.0
+ * @link      https://www.phpmyfaq.de
+ * @since     2009-03-01
+ */
+
+namespace phpMyFAQ\Auth;
+
+use phpMyFAQ\Auth;
+use phpMyFAQ\Configuration;
+use phpMyFAQ\Exception;
+use phpMyFAQ\Ldap as LdapCore;
+use phpMyFAQ\User;
+
+/**
+ * Class AuthLdap
+ *
+ * @package phpMyFAQ\Auth
+ */
+class AuthLdap extends Auth implements AuthDriverInterface
+{
+    /**
+     * LDAP connection handle.
+     *
+     * @var AuthLdap
+     */
+    private $ldap = null;
+
+    /**
+     * LDAP server(s).
+     *
+     * @var array
+     */
+    private $ldapServer = [];
+
+    /**
+     * Internal key of the active LDAP server where user was found.
+     *
+     * @var int
+     */
+    private $activeServer = 0;
+
+    /**
+     * Multiple LDAP servers.
+     *
+     * @var bool
+     */
+    private $multipleServers = false;
+
+    /**
+     * Constructor.
+     *
+     * @param Configuration $config
+     *
+     * @throws Exception
+     */
+    public function __construct(Configuration $config)
+    {
+        $this->config = $config;
+        $this->ldapServer = $this->config->getLdapServer();
+        $this->multipleServers = $this->config->get('ldap.ldap_use_multiple_servers');
+
+        parent::__construct($this->config);
+
+        if (0 === count($this->ldapServer)) {
+            throw new Exception('An error occurred while contacting LDAP: No configuration found.');
+        }
+
+        $this->ldap = new LdapCore($this->config);
+        $this->ldap->connect(
+            $this->ldapServer[$this->activeServer]['ldap_server'],
+            $this->ldapServer[$this->activeServer]['ldap_port'],
+            $this->ldapServer[$this->activeServer]['ldap_base'],
+            $this->ldapServer[$this->activeServer]['ldap_user'],
+            $this->ldapServer[$this->activeServer]['ldap_password']
+        );
+
+        if ($this->ldap->error) {
+            $this->errors[] = $this->ldap->error;
+        }
+    }
+
+    /**
+     * Does nothing. A function required to be a valid auth.
+     *
+     * @param string $login    Loginname
+     * @param string $password Password
+     *
+     * @return bool
+     */
+    public function changePassword($login, $password): bool
+    {
+        return true;
+    }
+
+    /**
+     * Does nothing. A function required to be a valid auth.
+     *
+     * @param string $login Loginname
+     *
+     * @return bool
+     */
+    public function delete($login): bool
+    {
+        return true;
+    }
+
+    /**
+     * Checks the password for the given user account.
+     *
+     * Returns true if the given password for the user account specified by
+     * is correct, otherwise false.
+     * Error messages are added to the array errors.
+     *
+     * This function is only called when local authentication has failed, so
+     * we are about to create user account.
+     *
+     * @param string $login        Loginname
+     * @param string $password     Password
+     * @param array  $optionalData Optional data
+     *
+     * @return bool
+     */
+    public function checkPassword($login, $password, array $optionalData = null): bool
+    {
+        if ('' === trim($password)) {
+            $this->errors[] = User::ERROR_USER_INCORRECT_PASSWORD;
+
+            return false;
+        }
+
+        // Get active LDAP server for current user
+        if ($this->multipleServers) {
+            // Try all LDAP servers
+            foreach ($this->ldapServer as $key => $value) {
+                $this->ldap->connect(
+                    $this->ldapServer[$key]['ldap_server'],
+                    $this->ldapServer[$key]['ldap_port'],
+                    $this->ldapServer[$key]['ldap_base'],
+                    $this->ldapServer[$key]['ldap_user'],
+                    $this->ldapServer[$key]['ldap_password']
+                );
+                if ($this->ldap->error) {
+                    $this->errors[] = $this->ldap->error;
+                }
+
+                if (false !== $this->ldap->getDn($login)) {
+                    $this->activeServer = (int)$key;
+                    break;
+                }
+            }
+        }
+
+        $bindLogin = $login;
+        if ($this->config->get('ldap.ldap_use_domain_prefix')) {
+            if (array_key_exists('domain', $optionalData)) {
+                $bindLogin = $optionalData['domain'] . '\\' . $login;
+            }
+        } else {
+            $this->ldap->connect(
+                $this->ldapServer[$this->activeServer]['ldap_server'],
+                $this->ldapServer[$this->activeServer]['ldap_port'],
+                $this->ldapServer[$this->activeServer]['ldap_base'],
+                $this->ldapServer[$this->activeServer]['ldap_user'],
+                $this->ldapServer[$this->activeServer]['ldap_password']
+            );
+            if ($this->ldap->error) {
+                $this->errors[] = $this->ldap->error;
+            }
+
+            $bindLogin = $this->ldap->getDn($login);
+        }
+
+        // Check user in LDAP
+        $this->ldap = new LdapCore($this->config);
+        $this->ldap->connect(
+            $this->ldapServer[$this->activeServer]['ldap_server'],
+            $this->ldapServer[$this->activeServer]['ldap_port'],
+            $this->ldapServer[$this->activeServer]['ldap_base'],
+            $bindLogin,
+            htmlspecialchars_decode($password)
+        );
+
+        if (!$this->ldap->bind($bindLogin, htmlspecialchars_decode($password))) {
+            $this->errors[] = $this->ldap->error;
+            return false;
+        } else {
+            $this->add($login, htmlspecialchars_decode($password));
+            return true;
+        }
+    }
+
+    /**
+     * Adds a new user account to the authentication table.
+     * Returns true on success, otherwise false.
+     *
+     * @param  string $login
+     * @param  string $password
+     * @param  string $domain
+     * @return bool
+     */
+    public function add($login, $password, $domain = ''): bool
+    {
+        $user = new User($this->config);
+        $result = $user->createUser($login, null, $domain);
+
+        $this->ldap->connect(
+            $this->ldapServer[$this->activeServer]['ldap_server'],
+            $this->ldapServer[$this->activeServer]['ldap_port'],
+            $this->ldapServer[$this->activeServer]['ldap_base'],
+            $this->ldapServer[$this->activeServer]['ldap_user'],
+            $this->ldapServer[$this->activeServer]['ldap_password']
+        );
+
+        if ($this->ldap->error) {
+            $this->errors[] = $this->ldap->error;
+        }
+
+        $user->setStatus('active');
+
+        // Set user information from LDAP
+        $user->setUserData(
+            array(
+                'display_name' => $this->ldap->getCompleteName($login),
+                'email' => $this->ldap->getMail($login),
+            )
+        );
+
+        return $result;
+    }
+
+    /**
+     * Returns number of characters of name, 0 will be returned if it fails.
+     *
+     * @param string $login        Loginname
+     * @param array  $optionalData Optional data
+     *
+     * @return int
+     */
+    public function checkLogin($login, array $optionalData = null): int
+    {
+        // Get active LDAP server for current user
+        if ($this->multipleServers) {
+            // Try all LDAP servers
+            foreach ($this->ldapServer as $key => $value) {
+                $this->ldap->connect(
+                    $this->ldapServer[$key]['ldap_server'],
+                    $this->ldapServer[$key]['ldap_port'],
+                    $this->ldapServer[$key]['ldap_base'],
+                    $this->ldapServer[$key]['ldap_user'],
+                    $this->ldapServer[$key]['ldap_password']
+                );
+                if ($this->ldap->error) {
+                    $this->errors[] = $this->ldap->error;
+                }
+
+                if (false !== $this->ldap->getDn($login)) {
+                    $this->activeServer = (int)$key;
+                    break;
+                }
+            }
+        }
+
+        $this->ldap->connect(
+            $this->ldapServer[$this->activeServer]['ldap_server'],
+            $this->ldapServer[$this->activeServer]['ldap_port'],
+            $this->ldapServer[$this->activeServer]['ldap_base'],
+            $this->ldapServer[$this->activeServer]['ldap_user'],
+            $this->ldapServer[$this->activeServer]['ldap_password']
+        );
+
+        return strlen($this->ldap->getCompleteName($login));
+    }
+}
