@@ -1,0 +1,1 @@
+# phpMyFAQ-version-upgrade
