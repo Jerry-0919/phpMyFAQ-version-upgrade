@@ -23,7 +23,7 @@ use phpMyFAQ\Helper\AdministrationHelper;
 use phpMyFAQ\Helper\LanguageHelper;
 use phpMyFAQ\Helper\PermissionHelper;
 use phpMyFAQ\System;
-use phpMyFAQ\Utils;
+
 
 if (!defined('IS_VALID_PHPMYFAQ')) {
     http_response_code(400);
