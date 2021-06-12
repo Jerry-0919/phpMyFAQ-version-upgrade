@@ -25,7 +25,6 @@ use phpMyFAQ\Instance\Client;
 use phpMyFAQ\Instance\Setup;
 use phpMyFAQ\Language;
 use phpMyFAQ\Meta;
-use phpMyFAQ\Stopwords;
 use phpMyFAQ\User;
 
 if (!defined('IS_VALID_PHPMYFAQ')) {
